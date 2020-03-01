@@ -127,6 +127,8 @@ void addOptimizationPasses(legacy::PassManagerBase *PM, int opt_level,
             PM->add(createSROAPass());                 // Break up aggregate allocas
             PM->add(createInstructionCombiningPass()); // Cleanup for scalarrepl.
             PM->add(createEarlyCSEPass());
+            // maybe add GVN?
+            // also try GVNHoist and GVNSink
         }
         PM->add(createMemCpyOptPass()); // Remove memcpy / form memset
         PM->add(createAlwaysInlinerLegacyPass()); // Respect always_inline
@@ -144,17 +146,19 @@ void addOptimizationPasses(legacy::PassManagerBase *PM, int opt_level,
         return;
     }
     PM->add(createPropagateJuliaAddrspaces());
-    PM->add(createScopedNoAliasAAWrapperPass());
+    PM->add(createScopedNoAliasAAWrapperPass()); // ???
     PM->add(createTypeBasedAAWrapperPass());
     if (opt_level >= 3) {
+        // this should always be done by default when alias info is needed --- WHY IS THIS HERE?
         PM->add(createBasicAAWrapperPass());
     }
     // list of passes from vmkit
     PM->add(createCFGSimplificationPass()); // Clean up disgusting code
-    PM->add(createDeadCodeEliminationPass());
+    PM->add(createDeadCodeEliminationPass());  // maybe do this later
     PM->add(createSROAPass()); // Kill useless allocas
 
-    PM->add(createMemCpyOptPass());
+    // should only be needed once:
+    //PM->add(createMemCpyOptPass());
 
     PM->add(createAlwaysInlinerLegacyPass()); // Respect always_inline
 
@@ -162,6 +166,8 @@ void addOptimizationPasses(legacy::PassManagerBase *PM, int opt_level,
     // merging the `alloca` for the unboxed data and the `alloca` created by the `alloc_opt`
     // pass.
     PM->add(createAllocOptPass());
+    // consider AggressiveInstCombinerPass at optlevel > 2
+    // createInstructionCombiningPass takes a argument that can disable 'expensive' combines and maxiter
     PM->add(createInstructionCombiningPass()); // Cleanup for scalarrepl.
     // Now that SROA has cleaned up for front-end mess, a lot of control flow should
     // be more evident - try to clean it up.
@@ -171,7 +177,7 @@ void addOptimizationPasses(legacy::PassManagerBase *PM, int opt_level,
     PM->add(createSROAPass());                 // Break up aggregate allocas
     PM->add(createInstructionCombiningPass()); // Cleanup for scalarrepl.
     PM->add(createJumpThreadingPass());        // Thread jumps.
-    PM->add(createInstructionCombiningPass()); // Combine silly seq's
+    //PM->add(createInstructionCombiningPass()); // Combine silly seq's
 
     //PM->add(createCFGSimplificationPass());    // Merge & remove BBs
     PM->add(createReassociatePass());          // Reassociate expressions
@@ -184,8 +190,9 @@ void addOptimizationPasses(legacy::PassManagerBase *PM, int opt_level,
     // Load forwarding above can expose allocations that aren't actually used
     // remove those before optimizing loops.
     PM->add(createAllocOptPass());
-    PM->add(createLoopIdiomPass()); //// ****
     PM->add(createLoopRotatePass());           // Rotate loops.
+    PM->add(createIndVarSimplifyPass());       // Canonicalize indvars
+    PM->add(createLoopIdiomPass()); //// ****
 #ifdef USE_POLLY
     // LCSSA (which has already run at this point due to the dependencies of the
     // above passes) introduces redundant phis that hinder Polly. Therefore we
@@ -201,17 +208,22 @@ void addOptimizationPasses(legacy::PassManagerBase *PM, int opt_level,
     PM->add(createLoopUnswitchPass());         // Unswitch loops.
     // Subsequent passes not stripping metadata from terminator
     PM->add(createInstructionCombiningPass());
-    PM->add(createIndVarSimplifyPass());       // Canonicalize indvars
     PM->add(createLoopDeletionPass());         // Delete dead loops
+    // this does only full unrolling, not partial:
     PM->add(createSimpleLoopUnrollPass());     // Unroll small loops
-    //PM->add(createLoopStrengthReducePass());   // (jwb added)
 
     // Run our own SROA on heap objects before LLVM's
     PM->add(createAllocOptPass());
     // Re-run SROA after loop-unrolling (useful for small loops that operate,
     // over the structure of an aggregate)
     PM->add(createSROAPass());                 // Break up aggregate allocas
-    PM->add(createInstructionCombiningPass()); // Clean up after the unroller
+    // or maybe pass false here:
+    // suggestion: LLVM PR to request an iteration cap; max_iter==1
+    // since instcombine runs until fixed point.
+    // only use the full fixed point one at beginning and end.
+    // in general consider cheaper instcombine for cleanup after other passes.
+    // consider createInstSimplifyLegacyPass() // cheaper instcombine
+    //PM->add(createInstructionCombiningPass()); // Clean up after the unroller
     PM->add(createGVNPass());                  // Remove redundancies
     PM->add(createMemCpyOptPass());            // Remove memcpy / form memset
     PM->add(createSCCPPass());                 // Constant prop with SCCP
@@ -228,14 +240,20 @@ void addOptimizationPasses(legacy::PassManagerBase *PM, int opt_level,
     // to simplification and deletion
     // this helps significantly with cleaning up iteration
     PM->add(createCFGSimplificationPass());     // Merge & remove BBs
-    PM->add(createLoopIdiomPass());
-    PM->add(createLoopDeletionPass());          // Delete dead loops
-    PM->add(createJumpThreadingPass());         // Thread jumps
-    PM->add(createSLPVectorizerPass());         // Vectorize straight-line code
-    PM->add(createAggressiveDCEPass());         // Delete dead instructions
+    //PM->add(createLoopIdiomPass());
+    //PM->add(createLoopDeletionPass());          // Delete dead loops
+    //PM->add(createJumpThreadingPass());         // Thread jumps
     PM->add(createInstructionCombiningPass());  // Clean up after SLP loop vectorizer
     PM->add(createLoopVectorizePass());         // Vectorize loops
-    PM->add(createInstructionCombiningPass());  // Clean up after loop vectorizer
+    PM->add(createLoopLoadEliminationPass());
+    PM->add(createCFGSimplificationPass());
+    PM->add(createSLPVectorizerPass());         // Vectorize straight-line code
+    // instcombine does not optimize vector instructions:
+    //PM->add(createInstructionCombiningPass());  // Clean up after loop vectorizer
+    // as of LLVM 11 isel depends on this running: (currently part of isel)
+    //PM->add(createVectorCombinePass());
+
+    PM->add(createAggressiveDCEPass());         // Delete dead instructions
 
     if (lower_intrinsics) {
         // LowerPTLS removes an indirect call. As a result, it is likely to trigger
@@ -253,6 +271,11 @@ void addOptimizationPasses(legacy::PassManagerBase *PM, int opt_level,
         PM->add(createCFGSimplificationPass());
     }
     PM->add(createCombineMulAddPass());
+
+    //PM->add(createLoopSinkPass()); // only makes sense with profile information
+    //PM->add(createInstSimplifyLegacyPass());
+    //PM->add(createDivRemPairsPass());
+    //PM->add(createCFGSimplificationPass());
 }
 
 extern "C" JL_DLLEXPORT
