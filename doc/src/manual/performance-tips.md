@@ -398,7 +398,7 @@ julia> typeof(d), typeof(d.a)
 julia> d = MyAlsoAmbiguousContainer(1:1.0:3);
 
 julia> typeof(d), typeof(d.a)
-(MyAlsoAmbiguousContainer, Vector{Float64})
+(MyAlsoAmbiguousContainer, Array{Float64,1})
 
 ```
 
